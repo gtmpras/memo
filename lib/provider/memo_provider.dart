@@ -3,26 +3,31 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:memo/models/memo_model.dart';
 
-final memoProvider = StateNotifierProvider<MemoNotifier, List<Memo>>((ref) {
-  return MemoNotifier();
+final memoProvider = StateNotifierProvider<MemoNotifier, AsyncValue<List<Memo>>>((ref) {
+  return MemoNotifier(ref);
 });
 
-class MemoNotifier extends StateNotifier<List<Memo>> {
-  MemoNotifier() : super([]) {
-    _loadMemos();
+class MemoNotifier extends StateNotifier<AsyncValue<List<Memo>>> {
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  
+  MemoNotifier(Ref ref) : super(const AsyncValue.loading()) {
+    // Listen to authentication state changes
+    _auth.authStateChanges().listen((user) {
+      if (user != null) {
+        _loadMemos(user.uid); // Load memos for the new user
+      } else {
+        state = const AsyncValue.data([]); // Clear memos when logged out
+      }
+    });
   }
 
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-
-  Future<void> _loadMemos() async {
-    final user = _auth.currentUser;
-    if (user == null) return;
-
+  // Load memos for the logged-in user
+  Future<void> _loadMemos(String userId) async {
     try {
       final memoSnapshot = await _firestore
           .collection('users')
-          .doc(user.uid)
+          .doc(userId)
           .collection('memos')
           .orderBy('createdAt', descending: true)
           .get();
@@ -31,12 +36,14 @@ class MemoNotifier extends StateNotifier<List<Memo>> {
         return Memo.fromMap(doc.data(), doc.id);
       }).toList();
 
-      state = fetchedMemos;
+      state = AsyncValue.data(fetchedMemos); // Update state with fetched memos
     } catch (e) {
+      state = AsyncValue.error('Failed to load memos',StackTrace.current);
       print("Error loading memos: $e");
     }
   }
 
+  // Add a new memo
   Future<void> addMemo(Memo memo) async {
     final user = _auth.currentUser;
     if (user == null) return;
@@ -48,40 +55,42 @@ class MemoNotifier extends StateNotifier<List<Memo>> {
         'createdAt': memo.createdAt.millisecondsSinceEpoch,
       });
 
-      state = [...state, memo.copyWith(id: docRef.id)];
+      state = state.whenData((memos) => [...memos, memo.copyWith(id: docRef.id)]);
     } catch (e) {
       print("Error saving memo: $e");
     }
   }
 
+  // Delete a memo
   Future<void> deleteMemo(String memoId) async {
     final user = _auth.currentUser;
     if (user == null) return;
 
     try {
       await _firestore.collection('users').doc(user.uid).collection('memos').doc(memoId).delete();
-      state = state.where((memo) => memo.id != memoId).toList();
+      state = state.whenData((memos) => memos.where((memo) => memo.id != memoId).toList());
     } catch (e) {
       print("Error deleting memo: $e");
     }
   }
 
-  Future<void> updateMemo (Memo updatedMemo)async{
+  // Update a memo
+  Future<void> updateMemo(Memo updatedMemo) async {
     final user = _auth.currentUser;
-    if(user == null)return;
+    if (user == null) return;
 
     try {
       await _firestore
-      .collection('users')
-      .doc(user.uid)
-      .collection('memos')
-      .doc(updatedMemo.id)
-      .update(updatedMemo.toMap());
+          .collection('users')
+          .doc(user.uid)
+          .collection('memos')
+          .doc(updatedMemo.id)
+          .update(updatedMemo.toMap());
 
-      state = state.map((memo)=> memo.id == updatedMemo.id ? updatedMemo: memo).toList();
+      state = state.whenData((memos) =>
+          memos.map((memo) => memo.id == updatedMemo.id ? updatedMemo : memo).toList());
     } catch (e) {
-      print("Error updating memo $e");
-    
+      print("Error updating memo: $e");
     }
   }
 }
